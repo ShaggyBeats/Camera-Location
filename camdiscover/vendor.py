@@ -1,0 +1,235 @@
+"""MAC OUI vendor lookup and device fingerprinting for cameras"""
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List
+
+
+# Curated OUI database for camera & network vendors
+OUI_DB: dict[str, str] = {
+    # Amcrest / Dahua
+    "3c:ef:8c": "Dahua/Amcrest",
+    "40:2c:76": "Dahua/Amcrest",
+    "4c:11:bf": "Dahua/Amcrest",
+    "48:34:29": "Dahua/Amcrest",
+    "a0:bd:1d": "Dahua/Amcrest",
+    "b0:c5:ca": "Dahua/Amcrest",
+    "d4:43:a8": "Dahua/Amcrest",
+    "e0:50:8b": "Dahua/Amcrest",
+    "f8:4d:fc": "Dahua/Amcrest",
+    "90:02:a9": "Dahua/Amcrest",
+    "38:af:29": "Dahua/Amcrest",
+    "20:17:42": "Dahua/Amcrest",
+    "e4:e2:24": "Dahua/Amcrest",
+    "2c:39:96": "Dahua/Amcrest",
+    "58:60:5f": "Dahua/Amcrest",
+    "c0:56:e3": "Dahua/Amcrest",
+    "f0:ad:4e": "Dahua/Amcrest",
+    "9c:8e:cd": "Dahua/Amcrest",
+    "a0:60:32": "Dahua/Amcrest",
+
+    # Hikvision
+    "18:68:cb": "Hikvision",
+    "28:57:be": "Hikvision",
+    "34:e4:2a": "Hikvision",
+    "44:19:b6": "Hikvision",
+    "54:e4:bd": "Hikvision",
+    "60:5b:c4": "Hikvision",
+    "6c:b9:5b": "Hikvision",
+    "7c:49:eb": "Hikvision",
+    "a4:14:37": "Hikvision",
+    "c0:56:e3": "Hikvision",
+    "ec:17:2f": "Hikvision",
+    "b0:c5:ca": "Hikvision",
+    "d4:43:a8": "Hikvision",
+    "fc:9f:fd": "Hikvision",
+    "3c:1b:f8": "Hikvision",
+    "54:8c:81": "Hikvision",
+    "24:48:45": "Hikvision",
+    "98:f1:12": "Hikvision",
+    "24:28:fd": "Hikvision",
+    "4c:f5:dc": "Hikvision",
+
+    # Axis
+    "00:40:8c": "Axis",
+    "ac:cc:8e": "Axis",
+    "b8:a4:4f": "Axis",
+    "00:08:51": "Axis",
+    "e8:43:5e": "Axis",
+
+    # Hanwha / Wisenet
+    "00:09:18": "Hanwha/Wisenet",
+    "e0:50:8b": "Hanwha/Wisenet",
+    "d4:43:a8": "Hanwha/Wisenet",
+
+    # Bosch
+    "00:0a:7a": "Bosch",
+    "00:40:93": "Bosch",
+
+    # Uniview
+    "4c:11:bf": "Uniview",
+    "a0:bd:1d": "Uniview",
+    "f8:4d:fc": "Uniview",
+
+    # Reolink
+    "b0:c5:ca": "Reolink",
+    "7c:49:eb": "Reolink",
+
+    # Vivotek
+    "00:02:d1": "Vivotek",
+    "00:17:e3": "Vivotek",
+    "b8:a4:2d": "Vivotek",
+
+    # Avigilon
+    "00:26:7e": "Avigilon",
+    "c8:2a:14": "Avigilon",
+
+    # Lorex
+    "28:ef:01": "Lorex",
+    "50:2d:8b": "Lorex",
+
+    # Infrastructure (useful for filtering)
+    "00:1a:2b": "Ubiquiti",
+    "24:5a:4c": "Ubiquiti",
+    "78:8a:20": "Ubiquiti",
+    "f0:9f:c2": "Ubiquiti",
+    "fc:ec:da": "Ubiquiti",
+    "00:15:5d": "Microsoft Hyper-V",
+    "00:50:56": "VMware",
+    "00:0c:29": "VMware",
+    "00:1c:42": "Parallels",
+}
+
+
+def lookup_vendor(mac: str) -> str:
+    """Look up vendor from MAC address using OUI prefix."""
+    if not mac or mac in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
+        return "Unknown"
+    normalized = mac.lower().replace("-", ":").replace(".", ":")
+    oui = ":".join(normalized.split(":")[:3])
+    return OUI_DB.get(oui, "Unknown")
+
+
+@dataclass
+class FingerprintResult:
+    vendor: str
+    model: str
+    confidence: int
+    protocols: List[str]
+
+
+def fingerprint_device(
+    mac: str,
+    open_ports: List[int],
+    http_banner: str = "",
+    onvif_response: str = "",
+) -> FingerprintResult:
+    """Fingerprint a device based on MAC, ports, and protocol responses."""
+    mac_vendor = lookup_vendor(mac)
+    result = FingerprintResult(
+        vendor=mac_vendor if mac_vendor != "Unknown" else "",
+        model="",
+        confidence=0,
+        protocols=[],
+    )
+
+    # Port-based fingerprinting
+    if 37777 in open_ports or 37778 in open_ports:
+        if not result.vendor:
+            result.vendor = "Dahua/Amcrest"
+        result.protocols.append("Dahua SDK")
+        result.confidence += 30
+
+    if 8000 in open_ports:
+        if not result.vendor:
+            result.vendor = "Hikvision"
+        result.protocols.append("Hikvision SDK")
+        result.confidence += 25
+
+    if 554 in open_ports:
+        result.protocols.append("RTSP")
+        result.confidence += 15
+
+    if 8899 in open_ports:
+        result.protocols.append("ONVIF")
+        result.confidence += 20
+
+    if 80 in open_ports or 8080 in open_ports:
+        result.protocols.append("HTTP")
+        result.confidence += 10
+
+    if 443 in open_ports:
+        result.protocols.append("HTTPS")
+        result.confidence += 10
+
+    # Banner-based fingerprinting
+    banner_lower = http_banner.lower()
+    vendor_keywords = {
+        "hikvision": "Hikvision",
+        "dvr": "Hikvision",
+        "ivms": "Hikvision",
+        "dahua": "Dahua/Amcrest",
+        "amcrest": "Dahua/Amcrest",
+        "axis": "Axis",
+        "vivotek": "Vivotek",
+        "reolink": "Reolink",
+        "uniview": "Uniview",
+        "hanwha": "Hanwha/Wisenet",
+        "wisenet": "Hanwha/Wisenet",
+        "bosch": "Bosch",
+        "avigilon": "Avigilon",
+        "lorex": "Lorex",
+    }
+    for keyword, vendor in vendor_keywords.items():
+        if keyword in banner_lower:
+            result.vendor = vendor
+            result.confidence += 40
+            break
+
+    # ONVIF response fingerprinting
+    if onvif_response:
+        onvif_lower = onvif_response.lower()
+        for keyword, vendor in vendor_keywords.items():
+            if keyword in onvif_lower:
+                result.vendor = vendor
+                result.confidence += 35
+                break
+
+        # Extract model from ONVIF scopes
+        import re
+        name_match = re.search(r"name/([\w-]+)", onvif_response)
+        if name_match:
+            result.model = name_match.group(1)
+        hw_match = re.search(r"hardware/([\w-]+)", onvif_response)
+        if hw_match:
+            result.model = result.model or hw_match.group(1)
+        scopes_match = re.search(r"<d:Scopes>(.*?)</d:Scopes>", onvif_response, re.DOTALL)
+        if scopes_match:
+            scopes = scopes_match.group(1)
+            name_m = re.search(r"onvif://www\.onvif\.org/name/(.+?)(?:\s|</)", scopes)
+            if name_m:
+                from urllib.parse import unquote
+                result.model = unquote(name_m.group(1))
+            mfr_m = re.search(r"onvif://www\.onvif\.org/manufacturer/(.+?)(?:\s|</)", scopes)
+            if mfr_m and result.vendor == "Unknown":
+                from urllib.parse import unquote
+                result.vendor = unquote(mfr_m.group(1))
+
+    # MAC vendor confirmation
+    if mac_vendor != "Unknown":
+        if result.vendor and mac_vendor.split("/")[0] in result.vendor:
+            result.confidence += 20
+        elif not result.vendor:
+            result.vendor = mac_vendor
+            result.confidence += 25
+
+    # Camera confidence heuristic
+    camera_ports = {80, 443, 554, 8000, 8080, 8899, 37777, 37778}
+    camera_port_count = len([p for p in open_ports if p in camera_ports])
+    if camera_port_count >= 3:
+        result.confidence += 20
+    elif camera_port_count >= 2:
+        result.confidence += 10
+
+    result.confidence = min(result.confidence, 100)
+    return result

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import os
 import re
 import socket
 import struct
 import threading
 import time
+import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -28,7 +32,7 @@ class OnvifDevice:
     raw_response: str = ""
 
 
-def send_onvif_probe(interface_ip: str = "", timeout: float = 5.0) -> List[OnvifDevice]:
+def send_onvif_probe(interface_ip: str = "", timeout: float = 3.0) -> List[OnvifDevice]:
     """Send ONVIF WS-Discovery probe and collect camera responses."""
     devices: List[OnvifDevice] = []
     seen_ips: set[str] = set()
@@ -104,15 +108,8 @@ def send_onvif_probe(interface_ip: str = "", timeout: float = 5.0) -> List[Onvif
         except Exception:
             pass
 
-        # Send a second probe after 2 seconds
-        time.sleep(2)
-        try:
-            sock.sendto(probe_bytes, (ONVIF_MULTICAST, ONVIF_PORT))
-        except Exception:
-            pass
-
         # Wait for listener to finish
-        listener_thread.join(timeout=timeout + 1)
+        listener_thread.join(timeout=timeout)
 
     finally:
         try:
@@ -188,7 +185,7 @@ class SsdpDevice:
     usn: str
 
 
-def send_ssdp_search(interface_ip: str = "", timeout: float = 5.0) -> List[SsdpDevice]:
+def send_ssdp_search(interface_ip: str = "", timeout: float = 3.0) -> List[SsdpDevice]:
     """Send SSDP M-SEARCH and collect device responses."""
     devices: List[SsdpDevice] = []
     seen_locations: set[str] = set()
@@ -247,14 +244,7 @@ def send_ssdp_search(interface_ip: str = "", timeout: float = 5.0) -> List[SsdpD
         except Exception:
             pass
 
-        # Second search after 2s
-        time.sleep(2)
-        try:
-            sock.sendto(search_bytes, (SSDP_MULTICAST, SSDP_PORT))
-        except Exception:
-            pass
-
-        listener_thread.join(timeout=timeout + 1)
+        listener_thread.join(timeout=timeout)
     finally:
         try:
             sock.close()
@@ -289,7 +279,7 @@ def _parse_ssdp_response(response: str, ip: str, port: int) -> Optional[SsdpDevi
 
 # ─── TCP Port Scanner ───────────────────────────────────────────────
 
-def scan_port(ip: str, port: int, timeout: float = 1.5) -> bool:
+def scan_port(ip: str, port: int, timeout: float = 3.0) -> bool:
     """Check if a TCP port is open."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -301,33 +291,14 @@ def scan_port(ip: str, port: int, timeout: float = 1.5) -> bool:
         return False
 
 
-def scan_ports(ip: str, ports: List[int] = None, timeout: float = 1.5,
-               batch_size: int = 30, callback: Callable = None) -> List[int]:
-    """Scan multiple TCP ports on a host."""
+def scan_ports(ip: str, ports: List[int] = None, timeout: float = 3.0,
+               callback: Callable = None) -> List[int]:
+    """Scan all camera ports on a host concurrently."""
     if ports is None:
         ports = ALL_CAMERA_PORTS
-
-    open_ports: List[int] = []
-
-    for i in range(0, len(ports), batch_size):
-        batch = ports[i:i + batch_size]
-        results = []
-        for port in batch:
-            t = threading.Thread(
-                target=lambda p, r: r.append((p, scan_port(ip, p, timeout))),
-                args=(port, results)
-            )
-            t.start()
-            results.append(None)  # placeholder
-            # Actually we need a different approach
-
-        # Better approach: use ThreadPool-like pattern
-        open_in_batch = _scan_port_batch(ip, batch, timeout)
-        open_ports.extend(open_in_batch)
-
-        if callback:
-            callback(i + len(batch), len(ports))
-
+    open_ports = _scan_port_batch(ip, ports, timeout)
+    if callback:
+        callback(len(ports), len(ports))
     return sorted(open_ports)
 
 
@@ -419,6 +390,236 @@ def probe_rtsp(ip: str, port: int = 554, timeout: float = 3.0) -> RtspResult:
         return RtspResult(found=False, banner="")
 
 
+# ─── ONVIF Device Info (ODM-style) ──────────────────────────────────
+# Like ONVIF Device Manager: query the device directly for real model,
+# firmware, serial number, and proper RTSP stream URIs instead of guessing.
+
+def _ws_security_header(username: str, password: str) -> str:
+    """Build ONVIF WS-Security PasswordDigest header.
+
+    ONVIF cameras require: PasswordDigest = Base64(SHA1(nonce + created + password))
+    HTTP Basic/Digest auth is rejected by most cameras.
+    """
+    nonce_bytes = os.urandom(16)
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    created_bytes = created.encode("utf-8")
+    password_bytes = password.encode("utf-8")
+    digest = base64.b64encode(
+        hashlib.sha1(nonce_bytes + created_bytes + password_bytes).digest()
+    ).decode("utf-8")
+    nonce_b64 = base64.b64encode(nonce_bytes).decode("utf-8")
+    return (
+        '<s:Header>'
+        '<Security s:mustUnderstand="1"'
+        ' xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd">'
+        '<UsernameToken>'
+        f'<Username>{username}</Username>'
+        f'<Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">'
+        f'{digest}</Password>'
+        f'<Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">'
+        f'{nonce_b64}</Nonce>'
+        f'<Created xmlns="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">'
+        f'{created}</Created>'
+        '</UsernameToken>'
+        '</Security>'
+        '</s:Header>'
+    )
+
+
+def _onvif_soap(url: str, username: str, password: str, body_xml: str,
+                timeout: float = 5.0) -> str:
+    """Send a SOAP envelope to an ONVIF endpoint using WS-Security PasswordDigest."""
+    security_header = _ws_security_header(username, password) if (username or password) else ""
+    envelope = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"'
+        ' xmlns:tds="http://www.onvif.org/ver10/device/wsdl"'
+        ' xmlns:trt="http://www.onvif.org/ver10/media/wsdl"'
+        ' xmlns:tt="http://www.onvif.org/ver10/schema">'
+        f'{security_header}'
+        f'<s:Body>{body_xml}</s:Body>'
+        '</s:Envelope>'
+    )
+    data = envelope.encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={
+            "Content-Type": 'application/soap+xml; charset=utf-8',
+            "User-Agent": "CamDiscover/1.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read(131072).decode("utf-8", errors="replace")
+
+
+@dataclass
+class OnvifDeviceInfo:
+    manufacturer: str = ""
+    model: str = ""
+    firmware: str = ""
+    serial: str = ""
+    hardware_id: str = ""
+    stream_uris: List[str] = field(default_factory=list)
+    error: str = ""
+
+
+def query_onvif_device_info(ip: str, onvif_url: str = "",
+                             username: str = "admin", password: str = "") -> OnvifDeviceInfo:
+    """
+    Like ODM's device detail panel: fetch manufacturer, model, firmware,
+    serial number, and real RTSP stream URIs via ONVIF SOAP calls.
+    """
+    if not onvif_url:
+        onvif_url = f"http://{ip}:8899/onvif/device_service"
+
+    info = OnvifDeviceInfo()
+
+    # ── GetDeviceInformation ─────────────────────────────────────────
+    try:
+        resp = _onvif_soap(onvif_url, username, password,
+                           "<tds:GetDeviceInformation/>")
+        def _tag(name: str) -> str:
+            m = re.search(rf"<[^>]*{re.escape(name)}[^>]*>([^<]+)<", resp)
+            return m.group(1).strip() if m else ""
+        info.manufacturer = _tag("Manufacturer")
+        info.model        = _tag("Model")
+        info.firmware     = _tag("FirmwareVersion")
+        info.serial       = _tag("SerialNumber")
+        info.hardware_id  = _tag("HardwareId")
+    except Exception as e:
+        info.error = str(e)
+        return info
+
+    # ── GetProfiles + GetStreamUri ────────────────────────────────────
+    try:
+        media_url = onvif_url.replace("device_service", "media_service")
+        # Try common media service paths
+        for media_path in (media_url, f"http://{ip}:8899/onvif/media_service",
+                           f"http://{ip}:80/onvif/media_service",
+                           f"http://{ip}:8080/onvif/media_service"):
+            try:
+                profiles_resp = _onvif_soap(media_path, username, password,
+                                            "<trt:GetProfiles/>")
+                tokens = re.findall(r'token="([^"]+)"', profiles_resp)
+                for token in tokens[:4]:   # fetch up to 4 profiles
+                    try:
+                        stream_resp = _onvif_soap(
+                            media_path, username, password,
+                            f'<trt:GetStreamUri>'
+                            f'  <trt:StreamSetup>'
+                            f'    <tt:Stream>RTP-Unicast</tt:Stream>'
+                            f'    <tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport>'
+                            f'  </trt:StreamSetup>'
+                            f'  <trt:ProfileToken>{token}</trt:ProfileToken>'
+                            f'</trt:GetStreamUri>',
+                        )
+                        uri_m = re.search(r"<[^>]*Uri[^>]*>([^<]+)<", stream_resp)
+                        if uri_m:
+                            uri = uri_m.group(1).strip()
+                            if uri.startswith("rtsp://") and uri not in info.stream_uris:
+                                info.stream_uris.append(uri)
+                    except Exception:
+                        pass
+                if tokens:
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    return info
+
+
+# ─── Dahua / Amcrest UDP Discovery ──────────────────────────────────
+
+# Dahua cameras listen on UDP 37020 for a specific broadcast probe.
+# Amcrest is an OEM of Dahua and uses the same protocol.
+_DAHUA_PROBE = bytes.fromhex(
+    "ff010000"   # magic
+    "00000000"   # sequence
+    "00000000"   # padding
+    "00000000"
+)
+
+
+def send_dahua_probe(interface_ip: str = "", timeout: float = 3.0) -> List[dict]:
+    """
+    Broadcast Dahua/Amcrest UDP discovery on port 37020 and collect responses.
+    Returns list of dicts with keys: ip, mac, sn, name, version.
+    """
+    found: List[dict] = []
+    seen: set = set()
+    lock = threading.Lock()
+
+    def _listen(sock: socket.socket):
+        sock.settimeout(timeout)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, addr = sock.recvfrom(2048)
+                ip = addr[0]
+                with lock:
+                    if ip in seen:
+                        continue
+                    seen.add(ip)
+                info = _parse_dahua_response(data, ip)
+                with lock:
+                    found.append(info)
+            except socket.timeout:
+                break
+            except Exception:
+                continue
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        if interface_ip:
+            try:
+                sock.bind((interface_ip, 0))
+            except Exception:
+                sock.bind(("", 0))
+        else:
+            sock.bind(("", 0))
+
+        listener_t = threading.Thread(target=_listen, args=(sock,), daemon=True)
+        listener_t.start()
+
+        sock.sendto(_DAHUA_PROBE, ("255.255.255.255", 37020))
+
+        listener_t.join(timeout=timeout)
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    return found
+
+
+def _parse_dahua_response(data: bytes, ip: str) -> dict:
+    """Parse a Dahua UDP discovery response into a dict."""
+    result = {"ip": ip, "mac": "", "sn": "", "name": "", "version": ""}
+    try:
+        text = data.decode("utf-8", errors="replace")
+        # Dahua responses are sometimes XML-like or have ASCII fields
+        mac_m = re.search(r"([0-9a-fA-F]{2}[:\-]){5}[0-9a-fA-F]{2}", text)
+        if mac_m:
+            result["mac"] = mac_m.group(0).replace("-", ":").lower()
+        sn_m = re.search(r"SN[:\s=]+([A-Za-z0-9\-]+)", text)
+        if sn_m:
+            result["sn"] = sn_m.group(1)
+        name_m = re.search(r"Name[:\s=]+([A-Za-z0-9_\-]+)", text)
+        if name_m:
+            result["name"] = name_m.group(1)
+        ver_m = re.search(r"Version[:\s=]+([^\s<&]+)", text)
+        if ver_m:
+            result["version"] = ver_m.group(1)
+    except Exception:
+        pass
+    return result
+
+
 # ─── Passive Listener ───────────────────────────────────────────────
 
 class PassiveListener:
@@ -430,6 +631,7 @@ class PassiveListener:
         self._sockets: List[socket.socket] = []
         self.on_onvif: Optional[Callable[[str, str], None]] = None
         self.on_ssdp: Optional[Callable[[str, str], None]] = None
+        self.on_dahua: Optional[Callable[[str, bytes], None]] = None
 
     def start(self, interface_ip: str = ""):
         """Start passive listening."""
@@ -442,6 +644,11 @@ class PassiveListener:
 
         # SSDP listener
         t = threading.Thread(target=self._listen_ssdp, args=(interface_ip,), daemon=True)
+        t.start()
+        self._threads.append(t)
+
+        # Dahua/Amcrest listener
+        t = threading.Thread(target=self._listen_dahua, args=(interface_ip,), daemon=True)
         t.start()
         self._threads.append(t)
 
@@ -481,6 +688,34 @@ class PassiveListener:
                     if "soap-envelope" in response or "discovery" in response.lower():
                         if self.on_onvif:
                             self.on_onvif(addr[0], response)
+                except socket.timeout:
+                    continue
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    def _listen_dahua(self, interface_ip: str):
+        """Listen for Dahua/Amcrest UDP discovery responses on port 37020."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            if interface_ip:
+                try:
+                    sock.bind((interface_ip, 37020))
+                except OSError:
+                    sock.bind(("", 37020))
+            else:
+                sock.bind(("", 37020))
+            self._sockets.append(sock)
+            sock.settimeout(1.0)
+            while self.running:
+                try:
+                    data, addr = sock.recvfrom(65535)
+                    if data and addr[0]:
+                        if self.on_dahua:
+                            self.on_dahua(addr[0], data)
                 except socket.timeout:
                     continue
                 except Exception:

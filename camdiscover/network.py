@@ -7,22 +7,26 @@ import re
 import socket
 import subprocess
 import struct
+import threading
 import time
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional, Tuple
 
 
 @dataclass
 class NetworkInterface:
     name: str
-    ip: str
+    ip: str           # primary (best) IP
     netmask: str
     cidr: str
     mac: str
-    iface_type: str  # ethernet | wi-fi | virtual | loopback | unknown
+    iface_type: str   # ethernet | wi-fi | virtual | loopback | unknown
     is_up: bool = True
     gateway: str = ""
     subnet: str = ""
+    all_ips: List[str] = field(default_factory=list)       # all IPs on this adapter
+    all_netmasks: List[str] = field(default_factory=list)  # matching netmasks
 
     @property
     def prefix_len(self) -> int:
@@ -31,127 +35,130 @@ class NetworkInterface:
         except Exception:
             return 24
 
+    def all_subnets(self) -> List[str]:
+        """Return CIDR for every IP on this adapter."""
+        result = []
+        for ip, mask in zip(self.all_ips, self.all_netmasks):
+            if ip.startswith("169.254"):
+                continue
+            try:
+                net = ipaddress.IPv4Network(f"{ip}/{mask}", strict=False)
+                result.append(str(net))
+            except Exception:
+                pass
+        return result
+
+
+def _best_ip(ips: List[str]) -> str:
+    """Pick the most useful IP: prefer non-APIPA, non-loopback, lowest /8."""
+    def score(ip: str) -> int:
+        if ip.startswith("169.254"):   return 100
+        if ip.startswith("127."):      return 90
+        if ip.startswith("172.28."):   return 50   # WSL virtual
+        return 0
+    candidates = [ip for ip in ips if not ip.startswith("169.254") and not ip.startswith("127.")]
+    if not candidates:
+        candidates = ips
+    return min(candidates, key=score) if candidates else ""
+
 
 def get_interfaces() -> List[NetworkInterface]:
-    """Get all network interfaces, sorted by priority."""
-    interfaces = []
-
-    # Parse route print for gateways
-    gateways = {}
-    try:
-        result = subprocess.run(
-            ["route", "print", "-4", "0.0.0.0"],
-            capture_output=True, text=True, timeout=10, shell=True
-        )
-        for m in re.finditer(r"\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\S+)", result.stdout):
-            gateways[m.group(3)] = m.group(1)
-    except Exception:
-        pass
-
-    # Get interfaces via netsh
-    try:
-        result = subprocess.run(
-            ["netsh", "interface", "ipv4", "show", "config"],
-            capture_output=True, text=True, timeout=10, shell=True
-        )
-        current_iface = None
-        for line in result.stdout.splitlines():
-            m = re.match(r'^Configuration for interface "(.+)"', line)
-            if m:
-                current_iface = m.group(1)
-                continue
-            if current_iface:
-                ip_m = re.match(r"\s+IP Address:\s+(\d+\.\d+\.\d+\.\d+)", line)
-                if ip_m:
-                    mask_m = re.match(r"\s+Subnet Prefix:\s+\d+\.\d+\.\d+\.\d+/(\d+)", next(
-                        (l for l in result.stdout.splitlines()[result.stdout.splitlines().index(line):]), ""
-                    ))
-    except Exception:
-        pass
-
-    # Fallback: use socket + ipconfig
-    hostname = socket.gethostname()
-    try:
-        local_ips = socket.getaddrinfo(hostname, None, socket.AF_INET)
-    except Exception:
-        local_ips = []
-
-    # Use ipconfig /all for detailed info
-    iface_data = {}
+    """
+    Parse all network interfaces including multi-homed adapters.
+    Returns one NetworkInterface per physical adapter; all_ips / all_netmasks
+    carry every secondary address so discover_local_subnets() sees them all.
+    """
+    # ── ipconfig /all ────────────────────────────────────────────────
+    iface_data: dict = {}   # name -> {mac, description, dhcp, gateway,
+                             #          ips: [(ip, mask)], ...}
     try:
         result = subprocess.run(
             ["ipconfig", "/all"],
             capture_output=True, text=True, timeout=10, shell=True
         )
-        current_section = None
+        current = None
+        last_ip = None
         for line in result.stdout.splitlines():
-            section_m = re.match(r"^[A-Za-z].*adapter (.+):", line)
-            if section_m:
-                current_section = section_m.group(1)
-                iface_data[current_section] = {}
+            # New adapter section
+            sec = re.match(r"^[A-Za-z].*adapter (.+):", line)
+            if sec:
+                current = sec.group(1)
+                iface_data[current] = {"ips": [], "masks": [], "gateway": "", "mac": "", "description": "", "dhcp": ""}
+                last_ip = None
                 continue
-            if current_section and current_section not in iface_data:
+            if current is None:
                 continue
 
+            # Collect every IPv4 address (there can be many on multi-homed adapters)
             ip_m = re.match(r"\s+IPv4 Address[.\s]+:\s+(\d+\.\d+\.\d+\.\d+)", line)
-            if ip_m and current_section:
-                iface_data.setdefault(current_section, {})["ip"] = ip_m.group(1)
+            if ip_m:
+                last_ip = ip_m.group(1).strip().rstrip("(Preferred)")
+                iface_data[current]["ips"].append(last_ip)
+                continue
 
             mask_m = re.match(r"\s+Subnet Mask[.\s]+:\s+(\d+\.\d+\.\d+\.\d+)", line)
-            if mask_m and current_section:
-                iface_data.setdefault(current_section, {})["netmask"] = mask_m.group(1)
+            if mask_m:
+                iface_data[current]["masks"].append(mask_m.group(1))
+                continue
 
-            mac_m = re.match(r"\s+Physical Address[.\s]+:\s+([0-9A-Fa-f-]+)", line)
-            if mac_m and current_section:
-                iface_data.setdefault(current_section, {})["mac"] = mac_m.group(1).replace("-", ":").lower()
+            mac_m = re.match(r"\s+Physical Address[.\s]+:\s+([0-9A-Fa-f-]{17})", line)
+            if mac_m and not iface_data[current]["mac"]:
+                iface_data[current]["mac"] = mac_m.group(1).replace("-", ":").lower()
+                continue
 
             desc_m = re.match(r"\s+Description[.\s]+:\s+(.+)", line)
-            if desc_m and current_section:
-                iface_data.setdefault(current_section, {})["description"] = desc_m.group(1)
-
-            dhcp_m = re.match(r"\s+DHCP Enabled[.\s]+:\s+(Yes|No)", line)
-            if dhcp_m and current_section:
-                iface_data.setdefault(current_section, {})["dhcp"] = dhcp_m.group(1)
+            if desc_m and not iface_data[current]["description"]:
+                iface_data[current]["description"] = desc_m.group(1).strip()
+                continue
 
             gw_m = re.match(r"\s+Default Gateway[.\s]+:\s+(\d+\.\d+\.\d+\.\d+)", line)
-            if gw_m and current_section:
-                iface_data.setdefault(current_section, {})["gateway"] = gw_m.group(1)
+            if gw_m and not iface_data[current]["gateway"]:
+                iface_data[current]["gateway"] = gw_m.group(1)
+                continue
+
     except Exception:
         pass
 
+    interfaces = []
     for name, data in iface_data.items():
-        if "ip" not in data:
+        ips = data["ips"]
+        masks = data["masks"]
+        if not ips:
             continue
-        ip = data["ip"]
-        netmask = data.get("netmask", "255.255.255.0")
-        mac = data.get("mac", "")
-        gateway = data.get("gateway", "")
-        description = data.get("description", "")
 
-        iface_type = classify_interface(name, description)
+        # Pad masks if ipconfig printed fewer than IPs (secondary IPs inherit same mask)
+        while len(masks) < len(ips):
+            masks.append(masks[-1] if masks else "255.255.255.0")
+
+        primary_ip = _best_ip(ips)
+        if not primary_ip:
+            continue
+        primary_idx = ips.index(primary_ip)
+        primary_mask = masks[primary_idx]
+
+        iface_type = classify_interface(name, data["description"])
         try:
-            subnet = str(ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False).network_address)
+            subnet = str(ipaddress.IPv4Network(f"{primary_ip}/{primary_mask}", strict=False).network_address)
         except Exception:
             subnet = "unknown"
-
-        prefix_len = 24
         try:
-            prefix_len = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False).prefixlen
+            prefix_len = ipaddress.IPv4Network(f"{primary_ip}/{primary_mask}", strict=False).prefixlen
         except Exception:
-            pass
+            prefix_len = 24
 
         interfaces.append(NetworkInterface(
             name=name,
-            ip=ip,
-            netmask=netmask,
-            cidr=f"{ip}/{prefix_len}",
-            mac=mac,
+            ip=primary_ip,
+            netmask=primary_mask,
+            cidr=f"{primary_ip}/{prefix_len}",
+            mac=data["mac"],
             iface_type=iface_type,
-            gateway=gateway,
+            gateway=data["gateway"],
             subnet=subnet,
+            all_ips=ips,
+            all_netmasks=masks,
         ))
 
-    # Sort: ethernet first, then wi-fi, then unknown, virtual last
     type_order = {"ethernet": 0, "wi-fi": 1, "unknown": 2, "virtual": 3, "loopback": 4}
     interfaces.sort(key=lambda i: type_order.get(i.iface_type, 3))
     return interfaces
@@ -161,22 +168,27 @@ def classify_interface(name: str, description: str = "") -> str:
     lower = (name + " " + description).lower()
     if "loopback" in lower:
         return "loopback"
+    # Check virtual BEFORE ethernet since "vEthernet" contains "ethernet"
+    if any(x in lower for x in ["hyper-v", "vmware", "virtual", "vethernet", "docker", "wsl", "vnic", "vpn", "tunnel", "venet"]):
+        return "virtual"
     if any(x in lower for x in ["wi-fi", "wireless", "wlan", "802.11"]):
         return "wi-fi"
     if any(x in lower for x in ["ethernet", "eth", "local area", "rj45"]):
         return "ethernet"
-    if any(x in lower for x in ["hyper-v", "vmware", "virtual", "vethernet", "docker", "wsl", "vnic", "vpn", "tunnel"]):
-        return "virtual"
     return "unknown"
 
+
+_arp_lock = threading.Lock()
 
 def get_arp_table() -> List[dict]:
     """Parse Windows ARP table."""
     entries = []
+    if not _arp_lock.acquire(timeout=5):
+        return entries   # another thread is already running arp -a
     try:
         result = subprocess.run(
             ["arp", "-a"],
-            capture_output=True, text=True, timeout=10
+            capture_output=True, text=True, timeout=8
         )
         for line in result.stdout.splitlines():
             # Match both formats:
@@ -198,6 +210,8 @@ def get_arp_table() -> List[dict]:
                 })
     except Exception:
         pass
+    finally:
+        _arp_lock.release()
     return entries
 
 
@@ -243,3 +257,316 @@ def ip_to_subnet(ip: str) -> str:
     """Get the /24 subnet for an IP."""
     parts = ip.split(".")
     return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+
+
+# ─── Subnet Zone Management ───────────────────────────────────────────
+
+def add_static_route(subnet: str, gateway: str, persistent: bool = False) -> bool:
+    """Add a static route to a subnet via a gateway. Returns True on success."""
+    try:
+        cmd = ["route", "add", subnet, gateway]
+        if persistent:
+            cmd.insert(1, "-p")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def remove_static_route(subnet: str, gateway: str) -> bool:
+    """Remove a static route. Returns True on success."""
+    try:
+        result = subprocess.run(
+            ["route", "delete", subnet, gateway],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def add_secondary_ip(interface_name: str, ip: str, prefix_len: int = 24) -> bool:
+    """Add a secondary IP address to an interface using Netsh. Returns True on success."""
+    try:
+        result = subprocess.run(
+            ["netsh", "interface", "ipv4", "add", "address",
+             interface_name, ip, str(_prefix_len_to_mask(prefix_len))],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def remove_secondary_ip(interface_name: str, ip: str) -> bool:
+    """Remove a secondary IP address from an interface. Returns True on success."""
+    try:
+        result = subprocess.run(
+            ["netsh", "interface", "ipv4", "delete", "address",
+             interface_name, ip],
+            capture_output=True, text=True, timeout=10
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _prefix_len_to_mask(prefix_len: int) -> str:
+    """Convert CIDR prefix length to dotted-decimal netmask."""
+    mask = (0xffffffff >> (32 - prefix_len)) << (32 - prefix_len)
+    return f"{(mask >> 24) & 0xff}.{(mask >> 16) & 0xff}.{(mask >> 8) & 0xff}.{mask & 0xff}"
+
+
+def get_routes() -> List[dict]:
+    """Get current IPv4 routing table."""
+    routes = []
+    try:
+        result = subprocess.run(
+            ["route", "print", "-4"],
+            capture_output=True, text=True, timeout=10, shell=True
+        )
+        for line in result.stdout.splitlines():
+            # Match: 0.0.0.0          0.0.0.0      192.168.1.1    192.168.1.148    35
+            m = re.match(
+                r"\s*(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+)",
+                line
+            )
+            if m:
+                routes.append({
+                    "destination": m.group(1),
+                    "netmask": m.group(2),
+                    "gateway": m.group(3),
+                    "interface": m.group(4),
+                    "metric": int(m.group(5)),
+                })
+    except Exception:
+        pass
+    return routes
+
+
+def test_tcp_port(ip: str, port: int, timeout: float = 3.0) -> bool:
+    """Test if a TCP port is reachable on a host."""
+    import socket as _socket
+    try:
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((ip, port))
+        sock.close()
+        return result == 0
+    except Exception:
+        return False
+
+
+def discover_local_subnets(exclude_virtual: bool = True) -> List[str]:
+    """Return subnets reachable from local interfaces + routing table, without any user input."""
+    found: set = set()
+
+    # 1. Subnets from local interfaces — use all_subnets() to handle multi-homed adapters
+    for iface in get_interfaces():
+        if exclude_virtual and iface.iface_type in ("virtual", "loopback"):
+            continue
+        for subnet_cidr in iface.all_subnets():
+            try:
+                net = ipaddress.IPv4Network(subnet_cidr, strict=False)
+                if net.prefixlen >= 8:
+                    found.add(str(net))
+            except Exception:
+                pass
+        # Fallback to primary IP if all_subnets() is empty
+        if not iface.all_subnets() and iface.ip and not iface.ip.startswith("169.254"):
+            try:
+                net = ipaddress.IPv4Network(f"{iface.ip}/{iface.netmask}", strict=False)
+                if net.prefixlen >= 8:
+                    found.add(str(net))
+            except Exception:
+                pass
+
+    # 2. Directly connected routes from routing table
+    try:
+        for route in get_routes():
+            dest = route["destination"]
+            netmask = route["netmask"]
+            gateway = route["gateway"]
+            iface_ip = route["interface"]
+
+            if dest in ("0.0.0.0", "255.255.255.255"):
+                continue
+            if dest.startswith(("224.", "239.", "127.")):
+                continue
+
+            # On-link: gateway matches the interface's own IP
+            if gateway == iface_ip:
+                try:
+                    net = ipaddress.IPv4Network(f"{dest}/{netmask}", strict=False)
+                    if net.prefixlen >= 8:
+                        found.add(str(net))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return sorted(found)
+
+
+def probe_subnet_connectivity(subnet: str, test_ports: List[int] = None) -> dict:
+    """Probe a subnet for basic connectivity. Returns summary stats."""
+    if test_ports is None:
+        test_ports = [80, 554, 8000, 37777]
+
+    base = ".".join(subnet.split(".")[:3])
+    reachable = 0
+    port_hits = {p: 0 for p in test_ports}
+    found_ips = []
+
+    # Quick ping sweep (first 20 IPs for speed)
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        futures = {}
+        for i in range(1, 20):
+            ip = f"{base}.{i}"
+            futures[executor.submit(ping_host, ip, 500)] = ip
+
+        for future in as_completed(futures):
+            ip = futures[future]
+            try:
+                if future.result():
+                    reachable += 1
+                    found_ips.append(ip)
+            except Exception:
+                pass
+
+    # Test ports on found IPs
+    for ip in found_ips:
+        for port in test_ports:
+            if test_tcp_port(ip, port, 1.0):
+                port_hits[port] += 1
+
+    return {
+        "subnet": subnet,
+        "reachable_hosts": reachable,
+        "tested_range": f"{base}.1-{base}.20",
+        "port_hits": port_hits,
+        "found_ips": found_ips,
+    }
+
+
+# ─── Subnet Sniffer ───────────────────────────────────────────────────
+# Inspired by Wireshark: detect subnets from live traffic rather than
+# relying on pre-configured lists.  Two layers:
+#   1. Raw IP socket with SIO_RCVALL (Windows admin required) — sees every
+#      packet crossing the interface, including cameras on foreign VLANs
+#      that happen to bridge to this segment.
+#   2. ARP-table poller (no admin) — catches anything that resolves at L2,
+#      which covers DHCP-assigned cameras that haven't been configured yet.
+# When a new /24 is first seen either way, on_new_subnet fires exactly once.
+
+@dataclass
+class SniffedSubnet:
+    subnet: str
+    first_seen_ip: str
+    source: str   # "packet" | "arp" | "route"
+
+
+class SubnetSniffer:
+    """Detect subnets from raw traffic and ARP table changes."""
+
+    _SKIP_PREFIXES = ("0.", "127.", "169.254.", "224.", "239.", "240.", "255.")
+
+    def __init__(self):
+        self._known: set = set()
+        self._lock = threading.Lock()
+        self._running = False
+        self._threads: List[threading.Thread] = []
+        self.on_new_subnet: Optional[Callable[[SniffedSubnet], None]] = None
+
+    # ── Public API ──────────────────────────────────────────────────
+
+    def seed(self, subnets: List[str]):
+        """Pre-mark subnets as already known so they don't trigger callbacks."""
+        with self._lock:
+            self._known.update(subnets)
+
+    def start(self, iface_ip: str = ""):
+        self._running = True
+        # Raw packet capture (needs admin; silently degrades otherwise)
+        t1 = threading.Thread(target=self._capture_raw, args=(iface_ip,), daemon=True)
+        # ARP poller (always works)
+        t2 = threading.Thread(target=self._poll_arp, daemon=True)
+        self._threads = [t1, t2]
+        t1.start()
+        t2.start()
+
+    def stop(self):
+        self._running = False
+        for t in self._threads:
+            t.join(timeout=3)
+
+    # ── Internal ────────────────────────────────────────────────────
+
+    def _report(self, ip: str, source: str):
+        if any(ip.startswith(p) for p in self._SKIP_PREFIXES):
+            return
+        parts = ip.split(".")
+        if len(parts) != 4:
+            return
+        subnet = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+        with self._lock:
+            if subnet in self._known:
+                return
+            self._known.add(subnet)
+        if self.on_new_subnet:
+            self.on_new_subnet(SniffedSubnet(subnet=subnet, first_seen_ip=ip, source=source))
+
+    def _capture_raw(self, iface_ip: str):
+        """Raw IP socket capture — sees every packet on the interface."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
+            if iface_ip:
+                try:
+                    s.bind((iface_ip, 0))
+                except Exception:
+                    pass
+            s.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+            # Windows: enable promiscuous capture
+            try:
+                s.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
+            except (AttributeError, OSError):
+                s.close()
+                return   # Not Windows or no admin — ARP poller covers us
+            s.settimeout(1.0)
+            try:
+                while self._running:
+                    try:
+                        data = s.recv(65535)
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    if len(data) < 20:
+                        continue
+                    src = socket.inet_ntoa(data[12:16])
+                    dst = socket.inet_ntoa(data[16:20])
+                    self._report(src, "packet")
+                    self._report(dst, "packet")
+            finally:
+                try:
+                    s.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
+                except Exception:
+                    pass
+                s.close()
+        except PermissionError:
+            pass   # No admin — ARP poller handles discovery
+        except Exception:
+            pass
+
+    def _poll_arp(self):
+        """Poll ARP table every 5 s — works without admin privileges."""
+        while self._running:
+            try:
+                for entry in get_arp_table():
+                    self._report(entry["ip"], "arp")
+            except Exception:
+                pass
+            for _ in range(50):   # sleep 5 s in 0.1 s chunks so stop() is responsive
+                if not self._running:
+                    break
+                time.sleep(0.1)

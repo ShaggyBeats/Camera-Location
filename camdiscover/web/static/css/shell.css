@@ -57,6 +57,7 @@
   --mode-dhcp:      #f59e0b;
   --mode-sweep:     #14b8a6;
   --mode-fp:        #8b5cf6;
+  --mode-dpi:       #22d3ee;
   --mode-report:    #6b7280;
 }
 
@@ -158,6 +159,7 @@
 .cam__mode-tab--active[data-mode="dhcp-trap"] { color: var(--mode-dhcp);   border-bottom-color: var(--mode-dhcp); }
 .cam__mode-tab--active[data-mode="sweep"]     { color: var(--mode-sweep);  border-bottom-color: var(--mode-sweep); }
 .cam__mode-tab--active[data-mode="fingerprint"]{ color: var(--mode-fp);    border-bottom-color: var(--mode-fp); }
+.cam__mode-tab--active[data-mode="dpi"]       { color: #22d3ee; border-bottom-color: #22d3ee; }
 .cam__mode-tab--active[data-mode="report"]    { color: var(--mode-report); border-bottom-color: var(--mode-report); }
 
 .cam__mode-icon { font-size: 13px; }
@@ -574,6 +576,8 @@
 .cam[data-mode="dhcp-trap"] .cam__header  { border-bottom-color: rgba(245,158,11,.15); }
 .cam[data-mode="sweep"] .cam__header      { border-bottom-color: rgba(20,184,166,.15); }
 .cam[data-mode="fingerprint"] .cam__header{ border-bottom-color: rgba(139,92,246,.15); }
+.cam[data-mode="dpi"] .cam__header        { border-bottom-color: rgba(34,211,238,.2); }
+.cam[data-mode="dpi"] .cam__progress-fill { background: linear-gradient(90deg, #22d3ee, #06b6d4); }
 
 /* ─── Scrollbar styling ──────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -588,4 +592,145 @@
 }
 .cam__tr--new {
   animation: device-appear .3s ease;
+}
+
+/* ─── Capture position indicator ────────────────────────────────────────── */
+.cam__capture-pos {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  transition: background .1s;
+}
+.cam__capture-pos:hover { background: var(--bg-input); }
+.cam__capture-pos__icon { font-size: 12px; }
+.cam__capture-pos--good .cam__capture-pos__icon { color: var(--accent-green); }
+.cam__capture-pos--limited .cam__capture-pos__icon { color: var(--warn); }
+.cam__capture-pos--unknown .cam__capture-pos__icon { color: var(--text-muted); }
+
+/* ─── Sidebar add button ────────────────────────────────────────────────── */
+.cam__sidebar-add-btn {
+  display: block;
+  width: calc(100% - 24px);
+  margin: 4px 12px 6px;
+  padding: 5px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  color: var(--accent-cyan);
+  background: rgba(34,211,238,.06);
+  border: 1px dashed rgba(34,211,238,.25);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all .12s;
+  text-align: center;
+}
+.cam__sidebar-add-btn:hover {
+  background: rgba(34,211,238,.12);
+  border-color: rgba(34,211,238,.4);
+}
+.cam__sidebar--collapsed .cam__sidebar-add-btn { display: none; }
+
+/* ─── Electron Title Bar ─────────────────────────────────────────────────── */
+.cam__titlebar {
+  display: none;
+  height: 38px;
+  background: #060710;
+  border-bottom: 1px solid var(--border-dim);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+body.is-electron .cam__titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.cam__titlebar__drag {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 14px;
+  flex: 1;
+  height: 100%;
+}
+.cam__titlebar__icon {
+  font-size: 14px;
+  color: var(--accent-cyan);
+}
+.cam__titlebar__title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.cam__titlebar__controls {
+  display: flex;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+.cam__titlebar__btn {
+  width: 46px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all .1s;
+}
+.cam__titlebar__btn:hover {
+  background: rgba(255,255,255,.06);
+  color: var(--text-primary);
+}
+.cam__titlebar__btn--close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+/* Electron mode adjustments */
+body.is-electron .cam__header {
+  /* Slightly less padding since title bar is above */
+  padding-top: 6px;
+}
+body.is-electron .cam {
+  border-top: none;
+}
+
+/* Watch button */
+.cam__watch-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-radius: 4px; cursor: pointer; border: none;
+  font-size: 11px; font-weight: 700; letter-spacing: .05em;
+  background: rgba(99,102,241,.12); color: #818cf8;
+  border: 1px solid rgba(99,102,241,.25);
+  transition: background .15s, border-color .15s;
+}
+.cam__watch-btn:hover { background: rgba(99,102,241,.22); }
+.cam__watch-btn--active {
+  background: rgba(34,197,94,.15); color: #22c55e;
+  border-color: rgba(34,197,94,.4);
+  animation: cam-watch-pulse 2s ease-in-out infinite;
+}
+.cam__watch-btn__dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor; flex-shrink: 0;
+}
+@keyframes cam-watch-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: .6; }
+}
+.cam__sidebar-section--flash {
+  animation: cam-section-flash .4s ease-out 3;
+}
+@keyframes cam-section-flash {
+  0%, 100% { background: transparent; }
+  50%       { background: rgba(234,179,8,.08); }
 }

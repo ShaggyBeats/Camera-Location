@@ -1,0 +1,67 @@
+{
+  "name": "camera-discovery-octopus",
+  "version": "1.0.0",
+  "description": "Vendor-agnostic IP camera discovery tool — Electron desktop wrapper",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:dev": "electron . --dev",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "build": {
+    "appId": "com.hiddencanopy.camera-discovery",
+    "productName": "Camera Discovery Octopus",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "camdiscover/**/*",
+      "camera-discover.py",
+      "!camdiscover/__pycache__",
+      "!**/*.pyc",
+      "!dist",
+      "!*.csv"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "electron/icons/icon.ico",
+      "requestedExecutionLevel": "requireAdministrator"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Camera Discovery Octopus",
+      "runAfterFinish": true
+    },
+    "extraResources": [
+      {
+        "from": "camdiscover",
+        "to": "camdiscover"
+      },
+      {
+        "from": "camera-discover.py",
+        "to": "camera-discover.py"
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "dependencies": {}
+}

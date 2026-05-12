@@ -10,6 +10,19 @@
 <body>
   <div class="cam" id="app">
 
+    <!-- ═══ Electron Title Bar (shown only in desktop mode) ═══ -->
+    <div class="cam__titlebar" id="electron-titlebar" style="display:none;">
+      <div class="cam__titlebar__drag">
+        <span class="cam__titlebar__icon">&#9673;</span>
+        <span class="cam__titlebar__title">Camera Discovery Octopus</span>
+      </div>
+      <div class="cam__titlebar__controls">
+        <button class="cam__titlebar__btn cam__titlebar__btn--minimize" id="btn-minimize" title="Minimize">&#9472;</button>
+        <button class="cam__titlebar__btn cam__titlebar__btn--maximize" id="btn-maximize" title="Maximize">&#9723;</button>
+        <button class="cam__titlebar__btn cam__titlebar__btn--close" id="btn-close" title="Close">&#10005;</button>
+      </div>
+    </div>
+
     <!-- ═══ Global Header ═══ -->
     <header class="cam__header">
       <div class="cam__header-brand">
@@ -37,6 +50,9 @@
         <button class="cam__mode-tab" data-mode="fingerprint">
           <span class="cam__mode-icon">&#9756;</span> Fingerprint
         </button>
+        <button class="cam__mode-tab" data-mode="dpi">
+          <span class="cam__mode-icon">&#128065;</span> DPI
+        </button>
         <button class="cam__mode-tab" data-mode="report">
           <span class="cam__mode-icon">&#9998;</span> Report
         </button>
@@ -45,6 +61,11 @@
       <div class="cam__header-spacer"></div>
 
       <div class="cam__status-indicators">
+        <div class="cam__capture-pos" id="capture-pos" title="Capture position — click to change">
+          <span class="cam__capture-pos__icon" id="capture-pos-icon">&#9681;</span>
+          <span class="cam__capture-pos__label" id="capture-pos-label">Ethernet</span>
+        </div>
+        <div class="cam__header-divider"></div>
         <div class="cam__status-dot" id="scan-status">
           <span class="cam__status-dot__icon cam__status-dot__icon--idle"></span>
           <span class="cam__status-dot__label">Idle</span>
@@ -58,6 +79,12 @@
 
       <button class="cam__scan-btn cam__scan-btn--start" id="scan-btn">
         <span class="cam__scan-btn__icon">&#9654;</span> Start Scan
+      </button>
+
+      <div class="cam__header-divider"></div>
+
+      <button class="cam__watch-btn" id="watch-btn" title="Subnet Watch — continuously sniff for new subnets and auto-scan them">
+        <span class="cam__watch-btn__dot"></span> Watch
       </button>
 
       <div class="cam__header-divider"></div>
@@ -119,6 +146,29 @@
           <div class="cam__sidebar-filters" id="subnet-filters">
             <!-- Populated dynamically -->
           </div>
+          <button class="cam__sidebar-add-btn" id="add-subnet-btn" title="Add subnet zone">+ Add Subnet</button>
+        </div>
+
+        <div class="cam__sidebar-section">
+          <div class="cam__sidebar-section-label">DPI Overview</div>
+          <div class="cam__stats-grid" id="dpi-stats-grid">
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-dpi-validated">0</span>
+              <span class="cam__stat-label">Validated</span>
+            </div>
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-dpi-issues">0</span>
+              <span class="cam__stat-label">Issues</span>
+            </div>
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-dpi-avg-score">—</span>
+              <span class="cam__stat-label">Avg Score</span>
+            </div>
+            <div class="cam__stat-item">
+              <span class="cam__stat-val" id="stat-subnet-zones">0</span>
+              <span class="cam__stat-label">Zones</span>
+            </div>
+          </div>
         </div>
 
         <div class="cam__sidebar-section cam__sidebar-section--bottom">
@@ -178,13 +228,14 @@
                 <th class="cam__th cam__th--ports" data-sort="ports">Ports</th>
                 <th class="cam__th cam__th--onvif">ONVIF</th>
                 <th class="cam__th cam__th--rtsp">RTSP</th>
+                <th class="cam__th cam__th--dpi">DPI</th>
                 <th class="cam__th cam__th--confidence" data-sort="confidence">Score</th>
                 <th class="cam__th cam__th--actions">Links</th>
               </tr>
             </thead>
             <tbody id="device-tbody">
               <tr class="cam__empty-row">
-                <td colspan="10">
+                <td colspan="11">
                   <div class="cam__empty-state">
                     <div class="cam__empty-icon">&#9673;</div>
                     <div class="cam__empty-text">No devices discovered yet</div>

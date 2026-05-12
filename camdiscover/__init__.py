@@ -42,6 +42,7 @@ DISCOVERY_MODES = {
     "dhcp-trap":   "DHCP trap — camera gets IP from your box",
     "sweep":       "Active sweep — scan likely subnets",
     "fingerprint": "Vendor fingerprint — MAC OUI + ports + banners + ONVIF",
+    "dpi":         "DPI validation — protocol-stage validation per device",
     "report":      "Report mode — export CSV/JSON with all findings",
 }
 

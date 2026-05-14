@@ -481,9 +481,22 @@ class SubnetSniffer:
     # ── Public API ──────────────────────────────────────────────────
 
     def seed(self, subnets: List[str]):
-        """Pre-mark subnets as already known so they don't trigger callbacks."""
+        """Pre-mark subnets as already known so they don't trigger callbacks.
+        Accepts both CIDR (192.168.1.0/24) and bare IPs (192.168.1.5).
+        All inputs are normalized to /24 CIDR for consistent matching."""
+        normalized = set()
+        for s in subnets:
+            if "/" in s:
+                normalized.add(s)
+            else:
+                # Bare IP → convert to /24
+                parts = s.split(".")
+                if len(parts) == 4:
+                    normalized.add(f"{parts[0]}.{parts[1]}.{parts[2]}.0/24")
+                else:
+                    normalized.add(s)
         with self._lock:
-            self._known.update(subnets)
+            self._known.update(normalized)
 
     def start(self, iface_ip: str = ""):
         self._running = True

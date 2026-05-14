@@ -178,11 +178,11 @@ def create_app() -> Flask:
 
     @app.route("/api/export/json")
     def api_export_json():
-        import tempfile, os
-        fd, path = tempfile.mkstemp(suffix=".json")
-        os.close(fd)
-        export_to_json(orchestrator.discovered_devices, path)
-        return send_file(path, as_attachment=True, download_name="camera-discovery.json")
+        import json as _json, io
+        data = [d.to_dict() for d in orchestrator.discovered_devices]
+        output = io.BytesIO(_json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"))
+        return send_file(output, as_attachment=True, download_name="camera-discovery.json",
+                         mimetype="application/json")
 
     @app.route("/api/events")
     def api_events():
@@ -516,28 +516,24 @@ def create_app() -> Flask:
 # ─── IP Change Helpers ────────────────────────────────────────────────────
 
 def _onvif_request(url: str, username: str, password: str, body_xml: str) -> str:
-    """Send a SOAP request to an ONVIF endpoint, returns response text."""
+    """Send a SOAP request to an ONVIF endpoint using WS-Security PasswordDigest."""
+    from .discovery import _ws_security_header
+    security_header = _ws_security_header(username, password) if (username or password) else ""
     envelope = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"'
         ' xmlns:tds="http://www.onvif.org/ver10/device/wsdl"'
         ' xmlns:tt="http://www.onvif.org/ver10/schema">'
+        f'{security_header}'
         f'<s:Body>{body_xml}</s:Body>'
         '</s:Envelope>'
     )
     data = envelope.encode("utf-8")
-    mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-    if password:
-        mgr.add_password(None, url, username, password)
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPDigestAuthHandler(mgr),
-        urllib.request.HTTPBasicAuthHandler(mgr),
-    )
     req = urllib.request.Request(
         url, data=data,
         headers={"Content-Type": "application/soap+xml; charset=utf-8", "User-Agent": "CamDiscover/1.0"},
     )
-    with opener.open(req, timeout=5) as resp:
+    with urllib.request.urlopen(req, timeout=5) as resp:
         return resp.read(65536).decode("utf-8", errors="replace")
 
 

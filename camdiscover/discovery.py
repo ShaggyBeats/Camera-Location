@@ -255,7 +255,7 @@ def send_ssdp_search(interface_ip: str = "", timeout: float = 3.0) -> List[SsdpD
 
 
 def _parse_ssdp_response(response: str, ip: str, port: int) -> Optional[SsdpDevice]:
-    """Parse an SSDP response."""
+    """Parse an SSDP response. Prefer IP from LOCATION header over source addr."""
     headers: Dict[str, str] = {}
     for line in response.split("\r\n"):
         idx = line.find(":")
@@ -267,10 +267,21 @@ def _parse_ssdp_response(response: str, ip: str, port: int) -> Optional[SsdpDevi
     if not headers.get("location") and not headers.get("st"):
         return None
 
+    # Extract IP from LOCATION header — more reliable than source addr
+    location = headers.get("location", "")
+    if location:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(location)
+            if parsed.hostname:
+                ip = parsed.hostname
+        except Exception:
+            pass
+
     return SsdpDevice(
         ip=ip,
         port=port,
-        location=headers.get("location", ""),
+        location=location,
         st=headers.get("st", ""),
         server=headers.get("server", ""),
         usn=headers.get("usn", ""),

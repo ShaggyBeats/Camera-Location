@@ -969,7 +969,6 @@
         ${esc(e.time)} ${esc(e.message)}
       </span>`;
     });
-    html += html;
     tickerInner.innerHTML = html;
   }
 

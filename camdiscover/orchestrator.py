@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import ipaddress
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -162,13 +164,14 @@ class DiscoveryOrchestrator:
 
     def _passive_sniff(self, iface_ip: str, duration: float = 5.0):
         """Run SubnetSniffer for a fixed window, collect ARP on anything new."""
-        import threading as _th
         new_subnets: List[str] = []
-        lock = _th.Lock()
+        lock = threading.Lock()
 
         sniffer = SubnetSniffer()
-        # Seed everything already known so only genuinely new subnets fire
-        sniffer.seed(list(self.devices.keys()))
+        # Seed with /24 subnets (normalize IPs to their /24 CIDR)
+        known_ips = list(self.devices.keys())
+        ip_subnets = [ip_to_subnet(ip) for ip in known_ips if ip]
+        sniffer.seed(ip_subnets)
         sniffer.seed(discover_local_subnets())
 
         def _on_new(sniffed: SniffedSubnet):
@@ -213,7 +216,7 @@ class DiscoveryOrchestrator:
     def _fingerprint_all_concurrent(self, ips: List[str], phase: str = "verify", max_workers: int = 20):
         total = len(ips)
         done = [0]
-        lock = __import__("threading").Lock()
+        lock = threading.Lock()
 
         def do_one(ip):
             if self._stopping:
@@ -281,10 +284,12 @@ class DiscoveryOrchestrator:
         if iface_ip:
             for subnet in subnets:
                 base = ".".join(subnet.split(".")[:3])
-                temp_ip = f"{base}.100"
-                if temp_ip != iface_ip:
-                    if add_temp_ip(iface_name, temp_ip):
-                        added_ips.append(temp_ip)
+                for candidate in (".100", ".200"):
+                    temp_ip = f"{base}{candidate}"
+                    if temp_ip != iface_ip and temp_ip not in added_ips:
+                        if add_temp_ip(iface_name, temp_ip):
+                            added_ips.append(temp_ip)
+                            break
 
         # Ping sweep
         self._emit_progress("sweep", 3, 7, "Running ping sweep...")
@@ -325,9 +330,9 @@ class DiscoveryOrchestrator:
         # First discover
         self._run_listen_mode()
 
-        # Then fingerprint each
-        ips = list(self.devices.keys())
-        self._emit_progress("fingerprint", 2, 3, f"Fingerprinting {len(ips)} device(s)...")
+        # Then fingerprint each (skip devices already fingerprinted by listen mode)
+        ips = [ip for ip in self.devices if not self.devices[ip].open_ports]
+        self._emit_progress("fingerprint", 2, 3, f"Fingerprinting {len(ips)} remaining device(s)...")
 
         for i, ip in enumerate(ips):
             if self._stopping:
@@ -352,10 +357,11 @@ class DiscoveryOrchestrator:
             device = self._get_or_create(ip, "ARP")
             if not device.mac and mac:
                 device.mac = mac
-                device.vendor = lookup_vendor(mac)
+                if device.vendor == "Unknown":
+                    device.vendor = lookup_vendor(mac)
             if "ARP" not in device.discovery_methods:
                 device.discovery_methods.append("ARP")
-            device.last_seen = __import__("datetime").datetime.now()
+            device.last_seen = _dt.datetime.now()
             self._emit_device_updated(device)
 
     def _merge_onvif_devices(self, onvif_devices: List[OnvifDevice]):
@@ -373,7 +379,7 @@ class DiscoveryOrchestrator:
             device.raw_responses["onvif"] = od.raw_response
             if "ONVIF" not in device.discovery_methods:
                 device.discovery_methods.append("ONVIF")
-            device.last_seen = __import__("datetime").datetime.now()
+            device.last_seen = _dt.datetime.now()
             self._emit_device_updated(device)
 
     def _merge_ssdp_devices(self, ssdp_devices: List[SsdpDevice]):
@@ -394,7 +400,7 @@ class DiscoveryOrchestrator:
             device.raw_responses["ssdp"] = str(sd.__dict__)
             if "SSDP" not in device.discovery_methods:
                 device.discovery_methods.append("SSDP")
-            device.last_seen = __import__("datetime").datetime.now()
+            device.last_seen = _dt.datetime.now()
             self._emit_device_updated(device)
 
     def _merge_dahua_devices(self, dahua_devices: List[dict]):
@@ -413,14 +419,14 @@ class DiscoveryOrchestrator:
             if dd.get("name") and not device.model:
                 device.model = dd["name"]
             device.raw_responses["dahua_udp"] = str(dd)
-            device.last_seen = __import__("datetime").datetime.now()
+            device.last_seen = _dt.datetime.now()
             self._emit_device_updated(device)
 
     def _merge_from_passive(self, ip: str, method: str, data: str):
         device = self._get_or_create(ip, method)
         if method not in device.discovery_methods:
             device.discovery_methods.append(method)
-        device.last_seen = __import__("datetime").datetime.now()
+        device.last_seen = _dt.datetime.now()
         device.raw_responses[method.lower()] = data
         self._emit_device_updated(device)
 
@@ -506,7 +512,7 @@ class DiscoveryOrchestrator:
             try:
                 info = query_onvif_device_info(ip, device.onvif_url)
                 if not info.error:
-                    if info.manufacturer and device.vendor == "Unknown":
+                    if info.manufacturer and device.vendor in ("Unknown", ""):
                         device.vendor = info.manufacturer
                     if info.model:
                         device.model = info.model
@@ -526,7 +532,7 @@ class DiscoveryOrchestrator:
 
         # Subnet
         device.subnet = ip_to_subnet(ip)
-        device.last_seen = __import__("datetime").datetime.now()
+        device.last_seen = _dt.datetime.now()
 
         self._emit_device_updated(device)
 
@@ -559,8 +565,7 @@ class DiscoveryOrchestrator:
             # Auto-configure access and scan in a background thread
             zone = SubnetZone(subnet=sniffed.subnet, label=f"Auto ({sniffed.source})", method="auto")
             self.add_subnet_zone(zone)
-            import threading as _th
-            _th.Thread(target=self._auto_scan_subnet, args=(sniffed.subnet,), daemon=True).start()
+            threading.Thread(target=self._auto_scan_subnet, args=(sniffed.subnet,), daemon=True).start()
 
         self._sniffer.on_new_subnet = _on_new
         self._sniffer.start(self.selected_interface.ip if self.selected_interface else "")
@@ -713,17 +718,23 @@ class DiscoveryOrchestrator:
                 timestamp=now(),
             )
 
-        # Stage 7: NTP
-        ntp_ok = test_tcp_port(ip, 123, 1.0) if reachable else False
-        device.dpi_stages["ntp"] = DPIStageResult(
-            stage="ntp",
-            status="pass" if ntp_ok else "fail",
-            detail="UDP 123 reachable" if ntp_ok else "NTP not reachable (UDP — may be false negative)",
-            timestamp=now(),
-        )
+        # Stage 7: NTP — UDP protocol, cannot reliably check via TCP
+        if reachable:
+            ntp_ok = test_tcp_port(ip, 123, 1.0)
+            device.dpi_stages["ntp"] = DPIStageResult(
+                stage="ntp",
+                status="pass" if ntp_ok else "na",
+                detail="TCP 123 reachable (may not be NTP — NTP uses UDP)" if ntp_ok else "NTP uses UDP 123 — cannot verify via TCP from this position",
+                timestamp=now(),
+            )
+        else:
+            device.dpi_stages["ntp"] = DPIStageResult(
+                stage="ntp", status="na",
+                detail="Device not reachable, NTP check skipped",
+                timestamp=now(),
+            )
 
-        # Stage 8: DNS
-        dns_ok = 53 in device.open_ports if device.open_ports else False
+        # Stage 8: DNS — requires capture at gateway to verify camera DNS queries
         device.dpi_stages["dns"] = DPIStageResult(
             stage="dns",
             status="na",
@@ -739,13 +750,12 @@ class DiscoveryOrchestrator:
             timestamp=now(),
         )
 
-        # Stage 10: Recording path
-        recording_ports = [445, 21, 25, 587]
-        recording_ok = any(p in (device.open_ports or []) for p in recording_ports)
+        # Stage 10: Recording path — cameras don't run SMB/FTP servers;
+        # these ports would be on the NVR, not the camera
         device.dpi_stages["recording"] = DPIStageResult(
             stage="recording",
-            status="pass" if recording_ok else "na",
-            detail="SMB/FTP/SMTP port found" if recording_ok else "No recording path ports detected from this device",
+            status="na",
+            detail="Recording path must be verified at NVR/storage side, not from camera endpoint",
             timestamp=now(),
         )
 

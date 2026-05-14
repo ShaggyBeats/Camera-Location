@@ -10,20 +10,17 @@ OUI_DB: dict[str, str] = {
     # Amcrest / Dahua
     "3c:ef:8c": "Dahua/Amcrest",
     "40:2c:76": "Dahua/Amcrest",
-    "4c:11:bf": "Dahua/Amcrest",
+    "4c:11:bf": "Dahua/Amcrest",       # also used by Uniview OEM
     "48:34:29": "Dahua/Amcrest",
-    "a0:bd:1d": "Dahua/Amcrest",
-    "b0:c5:ca": "Dahua/Amcrest",
-    "d4:43:a8": "Dahua/Amcrest",
-    "e0:50:8b": "Dahua/Amcrest",
-    "f8:4d:fc": "Dahua/Amcrest",
+    "a0:bd:1d": "Dahua/Amcrest",       # also used by Uniview OEM
+    "e0:50:8b": "Dahua/Amcrest",       # also used by Hanwha OEM
+    "f8:4d:fc": "Dahua/Amcrest",       # also used by Uniview OEM
     "90:02:a9": "Dahua/Amcrest",
     "38:af:29": "Dahua/Amcrest",
     "20:17:42": "Dahua/Amcrest",
     "e4:e2:24": "Dahua/Amcrest",
     "2c:39:96": "Dahua/Amcrest",
     "58:60:5f": "Dahua/Amcrest",
-    "c0:56:e3": "Dahua/Amcrest",
     "f0:ad:4e": "Dahua/Amcrest",
     "9c:8e:cd": "Dahua/Amcrest",
     "a0:60:32": "Dahua/Amcrest",
@@ -36,12 +33,12 @@ OUI_DB: dict[str, str] = {
     "54:e4:bd": "Hikvision",
     "60:5b:c4": "Hikvision",
     "6c:b9:5b": "Hikvision",
-    "7c:49:eb": "Hikvision",
+    "7c:49:eb": "Hikvision",       # also used by some Reolink OEM boards
     "a4:14:37": "Hikvision",
-    "c0:56:e3": "Hikvision",
+    "c0:56:e3": "Hikvision",       # also used by some Dahua OEM boards
     "ec:17:2f": "Hikvision",
-    "b0:c5:ca": "Hikvision",
-    "d4:43:a8": "Hikvision",
+    "b0:c5:ca": "Hikvision",       # also used by Dahua/Amcrest & Reolink OEM
+    "d4:43:a8": "Hikvision",       # also used by Dahua/Amcrest & Hanwha OEM
     "fc:9f:fd": "Hikvision",
     "3c:1b:f8": "Hikvision",
     "54:8c:81": "Hikvision",
